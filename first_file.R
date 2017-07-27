@@ -26,6 +26,7 @@ Git has recorded a complete history of your work
 In the event of impish gnomes introducing errors into your work, you can browse through your history,
 find the gnome to blame, and restore your previous good work. Gnomes be damned.
 
+####################
 
 Turn Git on for a folder
 $ git init
