@@ -4,6 +4,38 @@ library(lubridate)
 now()
 date()
 
+Create and commit a file
+
+commit
+- save file
+in Git tab
+- Check Staged
+- Click Commit
+in window;
+- Type a message in Commit message
+- Click Commit button
+
+Make an erroneous change to the file and save it
+Click Diff and then Revert
+The erroneous change has been undone and the previous version restored
+
+Delete a file
+Create a new file named doomed.md
+Enter some text and save it
+Delete this doomed file
+Under the Files tab check the box next to doomed.md
+Click Delete
+Under the Git tab, a red D appears next to the deleted file
+Stage the change by clicking the checkbox and commit it
+Inspect your work
+
+Make a few more changes and commits
+Click History under the Git tab to review your day's work
+Git has recorded a complete history of your work
+In the event of impish gnomes introducing errors into your work, you can browse through your history,
+find the gnome to blame, and restore your previous good work. Gnomes be damned.
+
+
 Turn Git on for a folder
 $ git init
 
