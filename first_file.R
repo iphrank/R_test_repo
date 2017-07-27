@@ -1,12 +1,6 @@
 # test git commit
-#
-library(lubridate)
-now()
-date()
 
-Create and commit a file
-
-commit
+Commit a file
 - save file
 in Git tab
 - Check Staged
@@ -16,18 +10,15 @@ in window;
 - Click Commit button
 
 Make an erroneous change to the file and save it
-Click Diff and then Revert
+- Click Diff and then Revert
 The erroneous change has been undone and the previous version restored
 
 Delete a file
-Create a new file named doomed.md
-Enter some text and save it
-Delete this doomed file
-Under the Files tab check the box next to doomed.md
+Under the Files tab check box of file
 Click Delete
 Under the Git tab, a red D appears next to the deleted file
-Stage the change by clicking the checkbox and commit it
-Inspect your work
+- Stage the change by clicking the checkbox
+- Click Commit
 
 Make a few more changes and commits
 Click History under the Git tab to review your day's work
