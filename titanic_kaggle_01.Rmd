@@ -1,0 +1,325 @@
+---
+title: "titanic"
+author: "Frank Ebbers"
+date: "`r Sys.Date()`"
+output:
+ html_document:
+    fig_width: 10
+    fig_height: 10
+    toc: yes
+    number_sections : yes
+    code_folding: show
+---
+
+#Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library("magrittr")
+library("dplyr")
+library("caret")
+library("data.table")
+library("mice")
+
+```
+#Data
+
+##Loading data in fresh environment
+
+```{r}
+rm(list = ls())
+
+trainRaw <- read.csv(paste(getwd(), "train.csv", sep = "/"))
+testRaw <- read.csv(paste(getwd(), "test.csv", sep = "/"))
+genderSubmission <- read.csv(paste(getwd(), "gender_submission.csv", sep = "/"))
+
+```
+
+##Data cleaning
+1. numerical check of data per feature
+2. initial feature selection/subsetting
+2. impute NA's
+3. 
+```{r}
+str(trainRaw)
+lapply(trainRaw, summary)
+
+```
+
+correlations, dependencies, clusters
+a. relations
+Sibsp
+Parch
+Ticket
+Cabin
+Embarked 
+Pclass
+
+b. wealth
+Fare
+Ticket
+Cabin
+Embarked
+Pclass
+
+c. physical/health
+Sex
+Age
+
+Uncorrelated, zerovariance features
+passenger_id is a sequence number and is removed from subset
+passenger_name is (initailly) removed from subset
+
+```{r}
+removeFeatures <- c("PassengerId", "Name")
+factorFeatures <- c("Survived", "Pclass")
+stringFeatures <- c("Ticket", "Cabin")
+keepFeatures <- c(names(trainRaw)) != removeFeatures
+df <- trainRaw[, keepFeatures]
+Map(factor, factorFeatures)
+df$Survived <- as.factor(df$Survived)
+df$Pclass <- as.factor(df$Pclass)
+Map(character, stringFeatures)
+df$Ticket <- as.character(df$Ticket)
+df$Cabin <- as.character(df$Cabin)
+str(df)
+# NA's, missing values
+# Cabin "", NA; 
+# Embarked ""; no relations for imputation, set to most frequent level "S"
+# set to "NO" 
+# cmd-shift-M 
+
+df <- df %>%
+    mutate(CabinClass = as.factor(if_else(Cabin == "" | is.na(Cabin), "N", substr(Cabin, 1, 1)))) %>% 
+    mutate(Embarked = as.factor(if_else(Embarked == "", "S", as.character(df$Embarked)))) %>% 
+    mutate(FamilySize = Parch + SibSp + 1)
+    # mutate(Age)
+head(df)
+str(df)
+
+# Age
+# NA
+# <0 'babies'?
+# 
+summary(df$Age)
+str(df$Age)
+table(df$Age < 1, df$CabinClass) # 6 babies without cabin
+table(df$Age < 1, df$Pclass) # babies traveling 1st, 2nd, 3rd class
+table(df$Age < 1, df$Survived) # all 7 babies (< 1 year) survived
+
+table(is.na(df$Age), df$Survived) # 52/125 odds NA's survived
+table(is.na(df$Age), df$Sex) # 53/124 odds female
+
+# NA's in age are proportional; Sex ~ Survived
+table(df$Survived, df$Sex, is.na(df$Age)) # 
+plot(table(df$Survived, df$Sex, is.na(df$Age))) # 
+
+
+plot(table(df$Survived, df$Pclass, is.na(df$Age))) # 
+
+table(df$Survived, df$CabinClass, is.na(df$Age)) # 
+plot(table(df$Survived, df$CabinClass, is.na(df$Age))) # 
+
+# NA's in age traveling alone; 133 of ttl
+# 7 NA's are member of familySize 11 ??
+# can't be right 7 passengers != 11
+table(df$FamilySize, is.na(df$Age))
+plot(table(df$FamilySize, is.na(df$Age))) # 
+df[df$FamilySize == 11,]
+df[df$Ticket == "CA. 2343",] # 
+
+# Fare = 0.00
+# ticket and Fare correlation
+# how to show each ticket has one/unique price
+g <- ggplot(df) +
+    geom_point(aes(df$Fare, df$Ticket)) 
+g
+table(df$Ticket, df$Fare)
+aov1 = aov(df$Fare ~ df$Ticket)
+summary(aov1)
+str(aov1)
+
+# GroupCount; #travelers on same ticket
+# impute Fare based on mean per Pclass
+meanFare <- mean(df$Fare)
+df <- df %>% 
+    group_by(Ticket) %>% 
+    mutate(GroupCount = n()) %>% 
+    group_by(Pclass, Embarked) %>% 
+    mutate(TicketPrice = ifelse(Fare == 0, mean(Fare), Fare))
+df
+
+# predict NA age
+# 
+ageIsNA <- is.na(df$Age)
+ageLtOne <- df$Age < 1
+trainIdx <- !(ageIsNA | ageLtOne)
+testIdx <- (ageIsNA | ageLtOne)
+trainAge <- df[trainIdx, -1]
+testAge <- df[testIdx,]
+
+lmAge <- lm(Age ~ Pclass + FamilySize, data = trainAge)
+predAge <- as.integer(predict(lmAge, testAge))
+
+# impute age predictions
+df$AgeLm <- df$Age
+df[testIdx,]$AgeLm <- predAge
+
+# parent(s) with small children
+# 
+
+# embarked
+
+g <- ggplot(df, aes(x = Embarked, colour = Survived))
+g +  geom_freqpoly(stat = "count") 
+g +  geom_bar()
+
+
+g <- ggplot(df, aes(x = Pclass, colour = Survived, size = Embarked))
+g +  geom_freqpoly(stat = "count") 
+g +  geom_bar()
+
+g <- ggplot(df, aes(x = Pclass, y = Embarked))
+# g +  geom_tile(aes(fill = Survived))
+g +  geom_raster(aes(alpha = Survived))
+
+par(mfrow = c(1,1))
+plot(df$Survived ~ df$Pclass + df$Embarked)
+
+# correlation between Survived and Age
+ggplot(df) +
+    geom_boxplot(aes(df$Survived, df$AgeLm))
+
+g <- ggplot(df)
+g +  geom_bar(aes(AgeLm, group = Survived, colour = Survived), binwidth = 10 ,stat = "count")
+g +  geom_line(aes(AgeLm, group = Survived, colour = Survived), stat = "count")
+g +  geom_line(aes(Embarked, group = Survived, colour = Survived), stat = "count")
+
+g +  geom_point(aes(AgeLm, Embarked, group = Survived, colour = Survived))
+g +  geom_point(aes(AgeLm, Pclass, group = Survived, colour = Survived))
+g +  geom_point(aes(AgeLm, Sex, group = Survived, colour = Survived))
+g +  geom_point(aes(AgeLm, GroupCount, group = Survived, colour = Survived))
+g +  geom_point(aes(AgeLm, logPrice, group = Survived, colour = Survived))
+g +  geom_point(aes(Sex, logPrice, group = Survived, colour = Survived))
+g +  geom_point(aes(AgeLm, CabinClass, group = Survived, colour = Survived))
+df$hasCabin <- ifelse(df$CabinClass == "N", 0, 1)
+
+# correlation between Survived and TicketPrice
+ggplot(df) +
+    geom_boxplot(aes(df$Survived, log(df$TicketPrice)))
+df$logPrice <- log(df$TicketPrice)
+
+```
+
+#Model
+
+##Decision Tree
+```{r}
+
+formula <- Survived ~ Pclass + Sex + Embarked + hasCabin + logPrice + AgeLm + GroupCount + FamilySize
+
+treeModel <- C5.0(formula, data = df)
+ruleModel <- C5.0(formula, data = df, rules = TRUE)
+summary(ruleModel)
+summary(treeModel)
+
+
+rfModel <- train(formula, data = df, method = "glm")
+confusionMatrix(rfModel)
+```
+
+
+```{r}
+
+
+
+
+
+
+#=================================================================
+# Split Data
+#=================================================================
+
+# Use caret to create a 70/30% split of the training data,
+# keeping the proportions of the Survived class label the
+# same across splits.
+set.seed(54321)
+indexes <- createDataPartition(df$Survived,
+                               times = 1,
+                               p = 0.7,
+                               list = FALSE)
+titanic.train <- train[indexes,]
+titanic.test <- train[-indexes,]
+
+
+# Examine the proportions of the Survived class lable across
+# the datasets.
+prop.table(table(train$Survived))
+prop.table(table(titanic.train$Survived))
+prop.table(table(titanic.test$Survived))
+
+#=================================================================
+# Train Model
+#=================================================================
+
+# Set up caret to perform 10-fold cross validation repeated 3
+# times and to use a grid search for optimal model hyperparamter
+# values.
+train.control <- trainControl(method = "repeatedcv",
+                              number = 10,
+                              repeats = 3,
+                              search = "grid")
+
+
+# Leverage a grid search of hyperparameters for xgboost. See
+# the following presentation for more information:
+# https://www.slideshare.net/odsc/owen-zhangopen-sourcetoolsanddscompetitions1
+tune.grid <- expand.grid(eta = c(0.05, 0.075, 0.1),
+                         nrounds = c(50, 75, 100),
+                         max_depth = 6:8,
+                         min_child_weight = c(2.0, 2.25, 2.5),
+                         colsample_bytree = c(0.3, 0.4, 0.5),
+                         gamma = 0,
+                         subsample = 1)
+View(tune.grid)
+
+
+# Use the doSNOW package to enable caret to train in parallel.
+# While there are many package options in this space, doSNOW
+# has the advantage of working on both Windows and Mac OS X.
+#
+# Create a socket cluster using 10 processes.
+#
+# NOTE - Tune this number based on the number of cores/threads
+# available on your machine!!!
+#
+cl <- makeCluster(4, type = "SOCK")
+
+# Register cluster so that caret will know to train in parallel.
+registerDoSNOW(cl)
+
+# Train the xgboost model using 10-fold CV repeated 3 times
+# and a hyperparameter grid search to train the optimal model.
+caret.cv <- train(Survived ~ .,
+                  data = titanic.train,
+                  method = "xgbTree",
+                  tuneGrid = tune.grid,
+                  trControl = train.control)
+stopCluster(cl)
+
+
+# Examine caret's processing results
+caret.cv
+
+
+# Make predictions on the test set using a xgboost model
+# trained on all 625 rows of the training set using the
+# found optimal hyperparameter values.
+preds <- predict(caret.cv, titanic.test)
+
+
+# Use caret's confusionMatrix() function to estimate the
+# effectiveness of this model on unseen, new data.
+confusionMatrix(preds, titanic.test$Survived)
+```
+
