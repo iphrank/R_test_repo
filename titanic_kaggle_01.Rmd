@@ -13,313 +13,621 @@ output:
 
 #Setup
 ```{r setup, include=FALSE}
+
+library("knitr")
 knitr::opts_chunk$set(echo = TRUE)
 
-library("magrittr")
-library("dplyr")
+library("plyr") # load plyr before dplyr to avoid conflicts!
+library("tidyverse")
 library("caret")
-library("data.table")
-library("mice")
+library("stringr") # string functions tidyverse
+library("mlbench")
+library("C50")
+library("pROC")
 
 ```
 #Data
 
 ##Loading data in fresh environment
+Format and subset features on the fly
+
+Preset column types when reading;
+col_logical() [l], contains only T, F, TRUE or FALSE.
+col_integer() [i], integers.
+col_double() [d], doubles.
+col_euro_double() [e], “Euro” doubles that use , as the decimal separator.
+col_date() [D]: Y-m-d dates.
+col_datetime() [T]: ISO8601 date times
+col_character() [c], everything else.
+col_skip() [_], don’t import this column.
+
 
 ```{r}
 rm(list = ls())
 
-trainRaw <- read.csv(paste(getwd(), "train.csv", sep = "/"))
-testRaw <- read.csv(paste(getwd(), "test.csv", sep = "/"))
-genderSubmission <- read.csv(paste(getwd(), "gender_submission.csv", sep = "/"))
+fileTrain <- paste(getwd(), "train.csv", sep = "/")
+fileTest <- paste(getwd(), "test.csv", sep = "/")
+
+# Column types
+    # "-" = col_skip(),
+    # "?" = col_guess(),
+    # c = col_character(),
+    # D = col_date(),
+    # d = col_double(),
+    # i = col_integer(),
+    # l = col_logical(),
+    # n = col_number(),
+    # T = col_datetime(),
+    # t = col_time(),
+    # f = col_factor(levels = NULL) # custom add to readr function
+
+# check column class
+spec_csv(fileTrain, col_names = TRUE, col_types = NULL, 
+         n_max = 0, guess_max = 1000)
+
+# set only specific columns class in col_types
+trainHead <- read_csv(fileTrain,
+                      n_max = 1000,
+                      col_types = cols(
+                              PassengerId = col_skip(),
+                              Survived = col_factor(levels = NULL), 
+                              Pclass = col_factor(levels = NULL), 
+                              Sex = col_factor(levels = NULL),
+                              Embarked = col_factor(levels = NULL)))
+spec(trainHead) # double check column class
+
+# read with preformatted columns
+trainRaw <- read_csv(fileTrain, col_types = spec(trainHead))
+testRaw <- read_csv(fileTest, col_types = spec(trainHead))
+testRaw$Survived <- NA # temp feature for binding
+fullRaw <- rbind(trainRaw, testRaw)
+
+# clean up
+rm(fileTest, fileTrain, trainHead)
+testRaw$Survived <- NULL # remove temp feature
+
+# check data
+lapply(head(trainRaw, 100), summary)
 
 ```
 
-##Data cleaning
-1. numerical check of data per feature
-2. initial feature selection/subsetting
-2. impute NA's
-3. 
+##Split sets - after data wrangling??
 ```{r}
-str(trainRaw)
-lapply(trainRaw, summary)
+set.seed(54321)
+indexes <- createDataPartition(trainRaw$Survived,
+                               times = 1,
+                               p = 0.7,
+                               list = FALSE)
+train <- trainRaw[indexes,]
+test <- trainRaw[-indexes,]
+
+predictors <- names(trainRaw[names(trainRaw) != "Survived"])
 
 ```
 
-correlations, dependencies, clusters
-a. relations
-Sibsp
-Parch
-Ticket
-Cabin
-Embarked 
-Pclass
 
-b. wealth
-Fare
-Ticket
-Cabin
-Embarked
-Pclass
+##Data wrangling
+Explore
+1. NA's (incl. "")
+2. duplicates
+3. anomalies, inconsistencies, negatives (untrue values)
+4. extremes, outliers, zero values (true values)
+5. Uncorrelated, unbalanced and near zero-variance features
 
-c. physical/health
-Sex
-Age
 
-Uncorrelated, zerovariance features
-passenger_id is a sequence number and is removed from subset
-passenger_name is (initailly) removed from subset
+
+###NA's
+NA's found in 3 features; Age, Cabin and Embarked
+NA in Age has significant correlation with Survived; NA's have less chance
+NA in Cabin has significant correlation with Survived; NA's have more chance
+NA in Embarked are 2/891 observations, both NA's survived
+
+Conclusion;
+- add binary features; AgeNA, CabinNA
+- impute Age
+- Change Cabin NA to "N"
+- Assign Embarked NA to most frequent factor "S"
+
+
 
 ```{r}
-removeFeatures <- c("PassengerId", "Name")
-factorFeatures <- c("Survived", "Pclass")
-stringFeatures <- c("Ticket", "Cabin")
-keepFeatures <- c(names(trainRaw)) != removeFeatures
-df <- trainRaw[, keepFeatures]
-Map(factor, factorFeatures)
-df$Survived <- as.factor(df$Survived)
-df$Pclass <- as.factor(df$Pclass)
-Map(character, stringFeatures)
-df$Ticket <- as.character(df$Ticket)
-df$Cabin <- as.character(df$Cabin)
-str(df)
-# NA's, missing values
-# Cabin "", NA; 
-# Embarked ""; no relations for imputation, set to most frequent level "S"
-# set to "NO" 
-# cmd-shift-M 
+# get vector of features with NA
+tblNA <- function(df) {
+    isNA <- lapply(df, is.na)
+    sumNA <- lapply(isNA, sum)
+    unlist(sumNA[sumNA > 0])
+}
+tblNA(trainRaw)
 
-df <- df %>%
-    mutate(CabinClass = as.factor(if_else(Cabin == "" | is.na(Cabin), "N", substr(Cabin, 1, 1)))) %>% 
-    mutate(Embarked = as.factor(if_else(Embarked == "", "S", as.character(df$Embarked)))) %>% 
-    mutate(FamilySize = Parch + SibSp + 1)
-    # mutate(Age)
-head(df)
-str(df)
+# split NSE df$name in "df", "name"
+splitFeature <- function(q) {
+    r <- as.character(match.call())[2]
+    df <- str_extract(as.name(r), "\\w+")
+    df_ <- str_extract(as.name(r), "\\w+\\$")
+    name <- str_extract(as.name(r), "\\w+$")
+    list(df = df, df_ = df_, name = name)
+}
 
-# Age
-# NA
-# <0 'babies'?
+# NA ~ response matrix
+NAfact <- function(response) {
+    df <- str_extract(as.name(response), "\\w+")
+    r <- response
+    function(feature) {
+        nse <- parse(text = feature)
+        tbl <- prop.table(table(r, is.na(eval(nse))))
+        name <- str_extract(feature, "\\w+$")
+        rownames(tbl) <- c("Died", "Survived")
+        colnames(tbl) <- c(name, "NA")
+        sqsm <- function(x) sum(x)^2
+        marg2 <- round(ftable(sweep(addmargins(tbl, 1, 
+                        list(list(Sum = sum, Prop = sqsm))), 2,
+                        apply(tbl, 2, sum)/100, "/")), 1)
+    }
+}
+
+# list NA matrices and proportions
+NAlist <- splitFeature(trainRaw$Survived)$df_ %>% 
+     paste0(names(tblNA(trainRaw))) %>% 
+     lapply(NAfact(trainRaw$Survived)) %>% 
+     print()
+        
+NAfeatures <- names(tblNA(trainRaw))
+
+# clean up
+rm()
+
+```
+
+####Multiple NA'
+158 sobservations have NA's in Age AND Cabin
+
+```{r}
+trainRaw %>% 
+    subset(is.na(Age)) %>% 
+    subset(is.na(Cabin)) %>% 
+    #subset(is.na(Embarked)) %>% 
+    str()
+```
+
+
+
+
+
+##Check for duplicates
+No duplicates found in raw data
+
+```{r}
+# duplicates
+duplicates <- trainRaw[duplicated(trainRaw),]
+str(duplicates)
+rm(duplicates)
+```
+
+###Check for anomalies, extremes
+Fare = 0.00
+Age < 1 in decimal point
+
+```{r}
+
+```
+
+
+
+
+##Anomalies, inconsistencies, negatives (untrue values)
+Age below 1 year old in decimal points
+
+```{r}
+par(mfrow = c(2,2))
+boxplot(trainRaw$Age)
+boxplot(subset(trainRaw$Age, trainRaw$Age < 2))
+boxplot(trainRaw$SibSp)
+boxplot(trainRaw$Parch)
+boxplot(trainRaw$Fare)
+
+table(trainRaw$Fare[trainRaw$Fare <= 0])
+
+```
+
+
+##Extremes, outliers, zero values (true values)
+Fares are very longtailed
+
+```{r}
+boxplot(trainRaw$Fare)
+boxplot(subset(trainRaw$Fare, trainRaw$Fare > 100))
+
+```
+
+
+##Uncorrelated, unbalanced and near zero-variance features
+Name is 100% unique and must be engineered(split) or removed to eliminated overfitting
+Note: passenger_id is 100% unique a sequence number and is removed at loading data
+No near-zero variance features
+Parch is highly unbalanced the frequency ratio is 5.75 (freq 1st/freq 2nd: 0/1)
+
+```{r}
+# feature ratio statistics
+nzv <- nearZeroVar(trainRaw, saveMetrics = TRUE)
+nzv[order(nzv$percentUnique, decreasing = TRUE), ]
+
+# frequency ratio tables
+# frequency ratio threshold: 1.5 (max. density = 60%)
+fthres <- 1.5
+nzvRatio <- data.frame(nzv[nzv$freqRatio > fthres, ])
+nzv$features <- row.names(nzv)
+nzvFeatures <- nzv[nzv$freqRatio > fthres, "features"]
+dft <- list()
+for (i in seq_along(nzvFeatures)) {
+    df <- data.frame(data.frame(table(trainRaw[, nzvFeatures[i]]))[][2])
+    dft[[i]] <- list(df)
+}
+freqTab <- t(dft)
+colnames(freqTab) <- nzvFeatures
+options(knitr.table.format = 'html')
+kable(freqTab, format = "markdown", caption = "Frequency ratio")
+# check tree after new feature engineering whether new feature is important
 # 
-summary(df$Age)
-str(df$Age)
-table(df$Age < 1, df$CabinClass) # 6 babies without cabin
-table(df$Age < 1, df$Pclass) # babies traveling 1st, 2nd, 3rd class
-table(df$Age < 1, df$Survived) # all 7 babies (< 1 year) survived
-
-table(is.na(df$Age), df$Survived) # 52/125 odds NA's survived
-table(is.na(df$Age), df$Sex) # 53/124 odds female
-
-# NA's in age are proportional; Sex ~ Survived
-table(df$Survived, df$Sex, is.na(df$Age)) # 
-plot(table(df$Survived, df$Sex, is.na(df$Age))) # 
+```
 
 
-plot(table(df$Survived, df$Pclass, is.na(df$Age))) # 
+#General domain exploration and assumptions
 
-table(df$Survived, df$CabinClass, is.na(df$Age)) # 
-plot(table(df$Survived, df$CabinClass, is.na(df$Age))) # 
 
-# NA's in age traveling alone; 133 of ttl
-# 7 NA's are member of familySize 11 ??
-# can't be right 7 passengers != 11
-table(df$FamilySize, is.na(df$Age))
-plot(table(df$FamilySize, is.na(df$Age))) # 
-df[df$FamilySize == 11,]
-df[df$Ticket == "CA. 2343",] # 
+##Correlations, dependencies, ...
+Check decision tree
 
-# Fare = 0.00
-# ticket and Fare correlation
-# how to show each ticket has one/unique price
-g <- ggplot(df) +
-    geom_point(aes(df$Fare, df$Ticket)) 
-g
-table(df$Ticket, df$Fare)
-aov1 = aov(df$Fare ~ df$Ticket)
-summary(aov1)
-str(aov1)
+Influence on survival chance, getting in lifeboat;
+a. Relations; SibSp, Parch, Ticket, Cabin, Embarked, Pclass
+- Number of relations to get in lifeboat
+Engineering: surname(Name), GroupCount
+formulaA <- Survived ~ SibSp + Parch + Ticket + Cabin + Embarked + Pclass
 
-# GroupCount; #travelers on same ticket
-# impute Fare based on mean per Pclass
-meanFare <- mean(df$Fare)
-df <- df %>% 
+b. Wealth/class; Fare, Ticket, Cabin, Pclass
+- 
+Engineering: title(Name)
+formulaB <- Survived ~ Fare + Ticket + Cabin + Pclass
+
+
+c. Physical/health; Sex, Age
+- Ladies, children and eldery first in lifeboats
+- Mothers with small children
+- Strong/healthy last
+Engineering: mothers: Sex == female + Parch > 1 + 20 < Age < 50
+formulaC <- Survived ~ Sex + Age
+
+
+##Decision Tree
+
+```{r}
+
+library("rpart")
+library("partykit")
+
+# pre-processing
+# centering, scaling, spatial sign transforms, PCA or ICA "signal extraction",
+# imputation of numerical features
+numerics <- c("Fare", "Age")
+# "process model"
+procValues <- preProcess(trainRaw[,numerics],
+           method = c("center", "scale", "bagImpute","YeoJohnson")) # order of transforms see help
+# impute NA's
+NAimpute <- c("Age")
+procNAs <- preProcess(trainRaw[,NAimpute],
+           method = c("knnImpute"))
+# "process model"
+trainScaled <- predict(procNAs, trainRaw[,NAimpute])
+testScaled <- predict(procNAs, testRaw[,NAimpute])
+procNAs
+
+# formula
+formulaRaw <- Survived ~ .
+formulaA <- Survived ~ SibSp + Parch + Ticket + Cabin + Embarked + Pclass
+formulaB <- Survived ~ Fare + Ticket + Cabin + Pclass
+formulaC <- Survived ~ Sex + Age
+
+ctrl <- rpart.control(maxdepth = 4)
+rpartA <- rpart(formulaA, data = trainRaw, control = ctrl)
+rpart <- rpart(formulaB, data = trainRaw, control = ctrl)
+rpart <- rpart(formulaC, data = trainRaw, control = ctrl)
+
+trCtrl <- trainControl(method = "repeatedcv",
+                              number = 10,
+                              repeats = 3,
+                              classProbs = TRUE, # class probabilities
+                              summaryFunction = twoClassSummary) # calcs incl AUC
+
+gridTune <- expand.grid(max_depth = 5)
+    
+rpartTune <- train(Survived ~ Sex + Pclass,
+                  data = trainRaw,
+                  method = "rpart",
+                  metric = "ROC",
+                  tuneGrid = gridTune,
+                  verbose = FALSE,
+                  trControl = trCtrl)
+rpartTune
+
+plot(as.party(rpartTune))
+plot(as.party(rpart))
+
+rpart$splits
+t(t(rpart$variable.importance))
+```
+
+
+##Feature engineering
+
+
+###Name
+Title tells something about age, family rank and class/rank
+Surname tells something about family
+Extract title and surname
+
+```{r}
+
+train$Name <- as.character(train$Name)
+surname <- "\\w+,"
+title <- ",\\s.+\\."
+trim <- "\\w+\\s?\\w+"
+
+mean(grepl(title, train$Name)) # if mean is 1, 100% have title
+
+train$Surname <- train$Name %>% 
+    str_extract(surname) %>% 
+    str_extract(trim) %>% 
+    head()
+
+train$Title <- train$Name %>% 
+    str_extract(title) %>% 
+    str_extract(trim) %>% 
+    factor() %>% 
+    head()
+
+
+```
+
+###Cabin
+Cabin feature to scattered, granulated to be improve prediction performance
+Cabin is indicator of wealth, so is Fare. Fare is more accurate, therefore Cabin will be replaced by binary feature;
+hasCabin yes/no
+
+```{r}
+str(train$Cabin)
+table(train$Cabin)
+train$hasCabin <- as.factor(ifelse(train$Cabin == "", 0, 1))
+# train$hasCabin <- factor(train$hasCabin)
+```
+
+###Embarked
+Two observations are blank, both survived.
+There are 217 observations in "S" that survived, thus blanks can be set to "S" to simplify and generalize the model
+
+```{r}
+table(train$Embarked, train$Survived)
+train[train$Embarked == "",]$Embarked <- "S"
+train$Embarked <- factor(train$Embarked) # drop unused levels
+table(train$Embarked, train$Survived)
+
+```
+
+###SibSp, Parch
+Travelers with family; siblings, spouse, parents, children
+There is no knowledge beyond whether they travel with family members
+Thus FamilySize feature can be engineered
+Travelers can also travel in groups with friends (and family), this knowledge can be obtained from grouping tickets
+Taking the max of travelers per ticket and family, assuming family members are on the same ticket
+
+```{r}
+# sort out conflicts between dplyr and plyr; n()
+detach("package:plyr", unload = TRUE)
+
+train <- train %>%
+    mutate(FamilySize = Parch + SibSp + 1) %>% 
     group_by(Ticket) %>% 
     mutate(GroupCount = n()) %>% 
-    group_by(Pclass, Embarked) %>% 
-    mutate(TicketPrice = ifelse(Fare == 0, mean(Fare), Fare))
-df
+    mutate(GroupCount = max(GroupCount, FamilySize))
+```
 
-# predict NA age
-# 
-ageIsNA <- is.na(df$Age)
-ageLtOne <- df$Age < 1
+
+###Fare
+There are 15 Fares @0.00, which can be assumed NA's
+The pricerange is longtailed and not very significant
+It can be be best viewed as log()
+The 0.00 Fares should be imputed/predicted based on Embarked and Pclass
+
+```{r}
+table(as.integer(sqrt(train$Fare)), train$Pclass)
+table(as.integer(sqrt(train$Fare)), train$Embarked, train$Pclass)
+table(train$Pclass, train$Embarked)
+
+table(train$Embarked, train$Pclass)
+table(train$hasCabin, train$Pclass)
+table(as.integer(sqrt(train$Fare + 1)*2), train$hasCabin)
+table(as.integer(sqrt(train$Fare + 1)*2), train$Embarked)
+
+g <- ggplot(train)
+g +  geom_point(aes(log(train$Fare), train$Pclass))
+g +  geom_point(aes(log(train$Fare), train$hasCabin))
+
+# impute by lm
+FareLm <- lm(Fare ~ Age + Embarked + Pclass + Sex, data = train)
+summary(FareLm)
+train$predFare <- predict(FareLm, train)
+# dependent on Age (NA's)
+# not accurate
+
+# impute by group mean
+train <- train %>% 
+    group_by(Pclass) %>% 
+    mutate(Price = ifelse(Fare == 0, mean(Fare), Fare))
+train
+# more accurate
+```
+
+
+###Age
+177 NA's
+Age in decimals and less then 1, assumed to be typo's (BTW all survived)
+Too many imputations, too much effect on predictions
+Careful predict Age
+
+```{r}
+# Age: NA, <0
+# <0: anomal data; maybe '0.' typo
+summary(train$Age)
+# too many NA's typo's to replace by stat or to omit
+# use lm with selected features, (without response) to predict age 
+g <- ggplot(subset(train, Age < 5))
+g +  geom_line(aes(Age, group = Survived, colour = Survived), stat = "count")
+g +  geom_point(aes(Age, hasCabin, group = Survived, colour = Survived))
+g +  geom_point(aes(Age, Parch, group = Survived, colour = Survived))
+
+# feature selection to predit age
+table(train$Age < 1, train$hasCabin) # 6 babies without cabin
+table(train$Age < 1, train$Pclass) # babies traveling 1st, 2nd, 3rd class
+table(train$Age < 1, train$Survived) # all 7 babies (< 1 year) survived
+table(is.na(train$Age), train$Survived) # 52/125 odds NA's survived
+table(is.na(train$Age), train$Sex) # 53/124 odds female
+
+table(train$Survived, train$Sex, is.na(train$Age)) # 
+# NA's in age are proportional; Sex ~ Survived
+plot(table(train$Survived, train$Sex, is.na(train$Age))) # 
+plot(table(train$Survived, train$Pclass, is.na(train$Age))) # 
+plot(table(train$Survived, train$FamilySize, is.na(train$Age))) # 
+# most NA's are in FamilySize = 1
+
+# predict Age
+ageIsNA <- is.na(train$Age)
+ageLtOne <- train$Age < 1
 trainIdx <- !(ageIsNA | ageLtOne)
 testIdx <- (ageIsNA | ageLtOne)
-trainAge <- df[trainIdx, -1]
-testAge <- df[testIdx,]
+trainAge <- train[trainIdx, -1]
+testAge <- train[testIdx,]
 
-lmAge <- lm(Age ~ Pclass + FamilySize, data = trainAge)
+# fit model
+lmAge <- lm(Age ~ Pclass + Sex + Price, data = trainAge)
+summary(lmAge) # R-squared only 0.24
 predAge <- as.integer(predict(lmAge, testAge))
-
+summary(predAge) # note that age must be positive
 # impute age predictions
-df$AgeLm <- df$Age
-df[testIdx,]$AgeLm <- predAge
+train$AgeLm <- train$Age
+train[testIdx,]$AgeLm <- predAge
 
-# parent(s) with small children
-# 
-
-# embarked
-
-g <- ggplot(df, aes(x = Embarked, colour = Survived))
-g +  geom_freqpoly(stat = "count") 
-g +  geom_bar()
+```
 
 
-g <- ggplot(df, aes(x = Pclass, colour = Survived, size = Embarked))
-g +  geom_freqpoly(stat = "count") 
-g +  geom_bar()
+##Feature selection
+Subset features
 
-g <- ggplot(df, aes(x = Pclass, y = Embarked))
-# g +  geom_tile(aes(fill = Survived))
-g +  geom_raster(aes(alpha = Survived))
+```{r}
+summary(train)
+features <- names(train)
+selectedFeatures <- c("Survived", "Pclass", "Sex", "Embarked", "hasCabin", "GroupCount", "Price", "AgeLm")
+train <- train[,selectedFeatures]
+```
 
-par(mfrow = c(1,1))
-plot(df$Survived ~ df$Pclass + df$Embarked)
+##Feature selection (Caret)
+
+
+```{r}
+# ensure the results are repeatable
+set.seed(7)
+# define the control using a random forest selection function
+control <- rfeControl(functions = rfFuncs, method = "cv", number = 10)
+# run the RFE algorithm
+results <- rfe(trainRaw[,-1], trainRaw[,1], sizes = c(1:8), rfeControl = control)
+# summarize the results
+print(results)
+# list the chosen features
+predictors(results)
+# plot the results
+plot(results, type=c("g", "o"))
+```
+## Plots
+
+
+```{r}
 
 # correlation between Survived and Age
-ggplot(df) +
-    geom_boxplot(aes(df$Survived, df$AgeLm))
+g <- ggplot(train)
+g +  geom_boxplot(aes(train$Survived, train$AgeLm))
+g +  geom_boxplot(aes(train$Survived, log(train$Price)))
 
-g <- ggplot(df)
+g +  geom_bin2d(aes(Pclass, Embarked, group = Survived))
+g +  geom_bin2d(aes(Sex, Embarked, group = Survived))
+g +  geom_bin2d(aes(AgeLm, Embarked, group = Survived))
+g +  geom_bin2d(aes(AgeLm, Pclass, group = Survived))
+g +  geom_bin2d(aes(AgeLm, Sex, group = Survived))
+g +  geom_bin2d(aes(AgeLm, hasCabin, group = Survived))
+g +  geom_bin2d(aes(AgeLm, as.integer(log(Price)), group = Survived))
+
 g +  geom_bar(aes(AgeLm, group = Survived, colour = Survived), binwidth = 10 ,stat = "count")
+
 g +  geom_line(aes(AgeLm, group = Survived, colour = Survived), stat = "count")
 g +  geom_line(aes(Embarked, group = Survived, colour = Survived), stat = "count")
 
-g +  geom_point(aes(AgeLm, Embarked, group = Survived, colour = Survived))
-g +  geom_point(aes(AgeLm, Pclass, group = Survived, colour = Survived))
-g +  geom_point(aes(AgeLm, Sex, group = Survived, colour = Survived))
 g +  geom_point(aes(AgeLm, GroupCount, group = Survived, colour = Survived))
-g +  geom_point(aes(AgeLm, logPrice, group = Survived, colour = Survived))
-g +  geom_point(aes(Sex, logPrice, group = Survived, colour = Survived))
-g +  geom_point(aes(AgeLm, CabinClass, group = Survived, colour = Survived))
-df$hasCabin <- ifelse(df$CabinClass == "N", 0, 1)
+g +  geom_point(aes(AgeLm, as.integer(log(Price)), group = Survived, colour = Survived))
+g +  geom_point(aes(AgeLm, hasCabin, group = Survived, colour = Survived))
 
-# correlation between Survived and TicketPrice
-ggplot(df) +
-    geom_boxplot(aes(df$Survived, log(df$TicketPrice)))
-df$logPrice <- log(df$TicketPrice)
 
 ```
 
 #Model
 
-##Decision Tree
-```{r}
-
-formula <- Survived ~ Pclass + Sex + Embarked + hasCabin + logPrice + AgeLm + GroupCount + FamilySize
-
-treeModel <- C5.0(formula, data = df)
-ruleModel <- C5.0(formula, data = df, rules = TRUE)
-summary(ruleModel)
-summary(treeModel)
-
-
-rfModel <- train(formula, data = df, method = "glm")
-confusionMatrix(rfModel)
-```
 
 
 ```{r}
 
-
-
-
-
-
-#=================================================================
-# Split Data
-#=================================================================
-
-# Use caret to create a 70/30% split of the training data,
-# keeping the proportions of the Survived class label the
-# same across splits.
-set.seed(54321)
-indexes <- createDataPartition(df$Survived,
-                               times = 1,
-                               p = 0.7,
-                               list = FALSE)
-titanic.train <- train[indexes,]
-titanic.test <- train[-indexes,]
-
-
-# Examine the proportions of the Survived class lable across
-# the datasets.
-prop.table(table(train$Survived))
-prop.table(table(titanic.train$Survived))
-prop.table(table(titanic.test$Survived))
-
-#=================================================================
-# Train Model
-#=================================================================
-
-# Set up caret to perform 10-fold cross validation repeated 3
-# times and to use a grid search for optimal model hyperparamter
-# values.
-train.control <- trainControl(method = "repeatedcv",
+# number of repeats of grid
+ctrl <- trainControl(method = "repeatedcv",
                               number = 10,
                               repeats = 3,
-                              search = "grid")
+                              search = "grid",
+                              classProbs = TRUE, # class probabilities
+                              summaryFunction = twoClassSummary) # calcs incl AUC
 
-
-# Leverage a grid search of hyperparameters for xgboost. See
-# the following presentation for more information:
-# https://www.slideshare.net/odsc/owen-zhangopen-sourcetoolsanddscompetitions1
-tune.grid <- expand.grid(eta = c(0.05, 0.075, 0.1),
+# tuning grids; df of parameters
+tGrid <- expand.grid(eta = c(0.05, 0.075, 0.1),
                          nrounds = c(50, 75, 100),
                          max_depth = 6:8,
                          min_child_weight = c(2.0, 2.25, 2.5),
                          colsample_bytree = c(0.3, 0.4, 0.5),
                          gamma = 0,
                          subsample = 1)
-View(tune.grid)
 
-
-# Use the doSNOW package to enable caret to train in parallel.
-# While there are many package options in this space, doSNOW
-# has the advantage of working on both Windows and Mac OS X.
-#
-# Create a socket cluster using 10 processes.
-#
-# NOTE - Tune this number based on the number of cores/threads
-# available on your machine!!!
-#
-cl <- makeCluster(4, type = "SOCK")
-
-# Register cluster so that caret will know to train in parallel.
-registerDoSNOW(cl)
-
-# Train the xgboost model using 10-fold CV repeated 3 times
-# and a hyperparameter grid search to train the optimal model.
-caret.cv <- train(Survived ~ .,
-                  data = titanic.train,
+# fit model
+fit <- train(formulaRaw, data = trainRaw,
                   method = "xgbTree",
-                  tuneGrid = tune.grid,
-                  trControl = train.control)
-stopCluster(cl)
+                  preProc = c("center", "scale"),
+                  tuneGrid = tGrid,
+                  metric = "ROC", #*
+                  verbose = FALSE,
+                  trControl = ctrl)
 
+# prediction on test data
+pred <- predict(fit, test)
+str(pred)
 
-# Examine caret's processing results
-caret.cv
+prob <- predict(gbmTune, test, type = "prob")
+str(prob)
 
-
-# Make predictions on the test set using a xgboost model
-# trained on all 625 rows of the training set using the
-# found optimal hyperparameter values.
-preds <- predict(caret.cv, titanic.test)
-
-
-# Use caret's confusionMatrix() function to estimate the
 # effectiveness of this model on unseen, new data.
-confusionMatrix(preds, titanic.test$Survived)
+confusionMatrix(pred, testRaw$Survived)
+
+#pROC package
+rocCurve <- roc(response = testRaw$Survived,
+                predictor = prob[, "yes"],
+                levels = rev(levels(testRaw$Survived)))
+rocCurve
+
+plot(rocCurve)
+plot(rocCurve,
+     print.thres = c(.5, .2),
+     print.thres.pch = 16,
+     print.thres.cex = 1.2
+     )
+
 ```
 
