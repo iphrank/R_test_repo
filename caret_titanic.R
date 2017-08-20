@@ -1,20 +1,20 @@
-#=======================================================================================
+#------------------------------------------------------------------------------
 # File:        IntroToMachineLearning.R
 # Author:      Dave Langer
 # Description: This code illustrates the usage of the caret package for the An
 #              Introduction to Machine Learning with R and Caret" Meetup dated
 #              06/07/2017. More details on the Meetup are available at:
 #              https://www.meetup.com/data-science-dojo/events/239730653/
-#=======================================================================================
+#------------------------------------------------------------------------------
 
 #install.packages(c("e1071", "caret", "doSNOW", "ipred", "xgboost"))
 library(tidyverse)
 library(caret)
 library(doSNOW)
 
-#=================================================================
+#------------------------------------------------------------------------------
 # Load Data
-#=================================================================
+#------------------------------------------------------------------------------
 # clean up
 rm(list = ls())
 
@@ -22,34 +22,48 @@ getwd()
 fileTrain <- paste(getwd(), "train.csv", sep = "/")
 fileTest <- paste(getwd(), "test.csv", sep = "/")
 
-# check column class
+# check typeof features
 spec_csv(fileTrain, col_names = TRUE, col_types = NULL,
          n_max = 0, guess_max = 1000)
 
-# set only specific columns class in col_types
+# set/overule specific types in col_types
 trainHead <- read_csv(fileTrain,
                       n_max = 1000,
                       col_types = cols(
                               PassengerId = col_skip(),
-                              Survived = col_factor(levels = NULL),
-                              Pclass = col_factor(levels = NULL),
-                              Sex = col_factor(levels = NULL),
-                              Embarked = col_factor(levels = NULL)))
-spec(trainHead) # double check column class
+                              Survived = col_factor(NULL, F, F), # auto-level, unordered, NA not as level
+                              Pclass = col_factor(NULL, F, F),
+                              Sex = col_factor(NULL, F, F),
+                              Embarked = col_factor(NULL, F, F)))
 
+# double check column class
+spec(trainHead)
+str(trainHead)
 # read with preformatted columns
 train <- read_csv(fileTrain, col_types = spec(trainHead))
 
 #clean up
 rm(trainHead)
 
-#=================================================================
+#------------------------------------------------------------------------------
 # Data Wrangling
-#=================================================================
+#------------------------------------------------------------------------------
 
-# Replace missing embarked values with mode.
+# explore NA's
+tblNa <- . %>% lapply(is.na) %>% lapply(sum) %>% .[. > 0] %>% unlist
+train %>% tblNa
+
+# Replace 2 missing embarked values with level "S"
 table(train$Embarked)
-train$Embarked[train$Embarked == ""] <- "S"
+train$Embarked[is.na(train$Embarked)] <- "S"
+table(train$Embarked, !is.na(train$Embarked))
+
+# add feature hasCabin
+train$hasCabin <- TRUE
+train$hasCabin[is.na(train$Cabin)] <- FALSE
+table(train$hasCabin, !is.na(train$Cabin))
+mean(train$hasCabin == !is.na(train$Cabin))
+train$Cabin[is.na(train$Cabin)] <- "NO" # set NA to NO
 
 # Add a feature for family size.
 train$FamilySize <- 1 + train$SibSp + train$Parch
@@ -61,13 +75,13 @@ train$MissingAge <- as.factor(ifelse(is.na(train$Age), "Y", "N"))
 # Subset data to features we wish to keep/use.
 features <- c("Survived", "Pclass", "Sex", "Age", "SibSp",
               "Parch", "Fare", "Embarked", "MissingAge",
-              "FamilySize")
+              "FamilySize", "hasCabin")
 train <- train[, features]
 str(train)
 
-#=================================================================
+#------------------------------------------------------------------------------
 # Impute Missing Ages
-#=================================================================
+#------------------------------------------------------------------------------
 
 # impute missing values for the Age feature.
 # First, transform all feature to dummy variables.
@@ -82,9 +96,9 @@ train$Age <- imputed.data[, "Age"]
 # clean up
 rm()
 
-#=================================================================
+#------------------------------------------------------------------------------
 # Split Data
-#=================================================================
+#------------------------------------------------------------------------------
 
 # create a 70/30% split of the training data,
 # keeping the proportions of the Survived class
@@ -119,7 +133,7 @@ prop.table(table(titanic.test$Survived))
 # Set up caret to perform 10-fold cross validation repeated 3
 # times and to use a grid search for optimal model hyperparamter
 # values.
-ctrl <- trainControl(method = "repeatedcv",
+tctrl <- trainControl(method = "repeatedcv",
                               number = 10,
                               repeats = 3,
                               search = "grid")
@@ -146,7 +160,7 @@ fit <- train(Survived ~ .,
                   data = titanic.train,
                   method = "xgbTree",
                   tuneGrid = tgrid,
-                  trControl = ctrl)
+                  trControl = tctrl)
 # stop paralel
 stopCluster(cl)
 

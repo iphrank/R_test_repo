@@ -426,7 +426,9 @@ tblNA <- function(df) {
     sumNA <- lapply(isNA, sum)
     unlist(sumNA[sumNA > 0])
 }
-tblNA(trainRaw)
+tblNA(train)
+tblNa <- . %>% lapply(is.na) %>% lapply(sum) %>% .[. > 0] %>% unlist
+train %>% tblNa
 
 # split NSE df$name in "df", "name"
 splitFeature <- function(q) {
